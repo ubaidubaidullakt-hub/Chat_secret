@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Secret Chat</title>
+
+<style>
+body{margin:0;background:#0f172a;color:white;font-family:Arial}
+.top{background:#020617;padding:10px;display:flex;justify-content:space-between}
+#messages{height:55vh;overflow:auto;padding:10px}
+.msg{margin:6px;padding:6px;border-radius:6px}
+.mine{background:#1e293b}
+.other{background:#020617}
+.bottom{position:fixed;bottom:0;width:100%;background:#020617;display:flex}
+input{flex:1;padding:10px;border-radius:6px;border:none}
+button{margin:4px;padding:10px;border:none;border-radius:6px;background:#2563eb;color:white}
+#users{font-size:12px;color:#94a3b8;padding:5px}
+video{width:48%;border-radius:10px;background:black}
+#videoBox{display:none;position:fixed;inset:0;background:#000;padding:10px}
+</style>
+</head>
+
+<body>
+
+<div class="top">
+  <div>
+    <select id="channelSelect"></select>
+    <button onclick="createChannel()">➕</button>
+  </div>
+  <button onclick="startCall()">📹</button>
+</div>
+
+<div id="users"></div>
+<div id="messages"></div>
+
+<div class="bottom">
+  <input id="msg" placeholder="Message">
+  <button onclick="send()">➤</button>
+</div>
+
+<div id="videoBox">
+  <video id="localVideo" autoplay muted></video>
+  <video id="remoteVideo" autoplay></video><br>
+  <button onclick="endCall()">❌ End</button>
+</div>
+
+<!-- Firebase -->
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+<script>
+const firebaseConfig={
+  apiKey:"AIzaSyBfm9sdgiWVParO8zI2gP7xATUCODCLkzw",
+  authDomain:"secret-chat-2f397.firebaseapp.com",
+  databaseURL:"https://secret-chat-2f397-default-rtdb.firebaseio.com",
+  projectId:"secret-chat-2f397"
+};
+firebase.initializeApp(firebaseConfig);
+const db=firebase.database();
+
+let username=localStorage.getItem("name")||prompt("Name");
+localStorage.setItem("name",username);
+let uid=localStorage.getItem("uid")||Math.random().toString(36).slice(2);
+localStorage.setItem("uid",uid);
+
+let currentChannel="General";
+let msgRef, usersRef, callRef;
+
+function init(){
+  db.ref("channels/General").set(true);
+  loadChannels();
+}
+init();
+
+function loadChannels(){
+  db.ref("channels").on("value",s=>{
+    channelSelect.innerHTML="";
+    Object.keys(s.val()||{}).forEach(c=>{
+      let o=document.createElement("option");
+      o.value=o.text=c;
+      channelSelect.appendChild(o);
+    });
+    switchChannel(channelSelect.value||"General");
+  });
+}
+
+function createChannel(){
+  let n=prompt("Channel name");
+  if(n)db.ref("channels/"+n).set(true);
+}
+
+function switchChannel(c){
+  currentChannel=c;
+  messages.innerHTML="";
+  msgRef=db.ref("rooms/"+c+"/messages");
+  usersRef=db.ref("rooms/"+c+"/users");
+  callRef=db.ref("calls/"+c);
+
+  usersRef.child(uid).set(username);
+  usersRef.child(uid).onDisconnect().remove();
+
+  usersRef.on("value",s=>{
+    let u=s.val()||{};
+    users.innerText="Online: "+Object.values(u).join(", ");
+  });
+
+  msgRef.on("child_added",snap=>{
+    let d=snap.val();
+    let div=document.createElement("div");
+    div.className="msg "+(d.uid===uid?"mine":"other");
+    if(d.audio){
+      div.innerHTML=`<b>${d.name}</b><br><audio controls src="${d.audio}"></audio>`;
+    }else{
+      div.innerHTML=`<b>${d.name}</b>: ${d.text}`;
+    }
+    messages.appendChild(div);
+  });
+}
+
+function send(){
+  if(!msg.value)return;
+  msgRef.push({name:username,text:msg.value,uid});
+  msg.value="";
+}
+
+/* 🔊 WALKIE TALKIE */
+let recorder,chunks=[];
+document.body.onmousedown=async e=>{
+  if(e.target.innerText!=="🎙")return;
+  let s=await navigator.mediaDevices.getUserMedia({audio:true});
+  recorder=new MediaRecorder(s);
+  recorder.start();chunks=[];
+  recorder.ondataavailable=e=>chunks.push(e.data);
+};
+document.body.onmouseup=e=>{
+  if(!recorder)return;
+  recorder.stop();
+  recorder.onstop=()=>{
+    let blob=new Blob(chunks,{type:"audio/webm"});
+    let r=new FileReader();
+    r.onload=()=>msgRef.push({name:username,audio:r.result,uid});
+    r.readAsDataURL(blob);
+  };
+};
+
+/* 🎥 VIDEO CALL */
+let pc,localStream;
+
+async function startCall(){
+  videoBox.style.display="block";
+  localStream=await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+  localVideo.srcObject=localStream;
+
+  pc=new RTCPeerConnection();
+  localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+  pc.ontrack=e=>remoteVideo.srcObject=e.streams[0];
+
+  pc.onicecandidate=e=>{
+    if(e.candidate)callRef.push({ice:e.candidate,from:uid});
+  };
+
+  let offer=await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  callRef.push({offer,from:uid});
+}
+
+callRef=db.ref("calls/"+currentChannel);
+callRef.on("child_added",async s=>{
+  let d=s.val();
+  if(d.from===uid)return;
+
+  if(d.offer){
+    videoBox.style.display="block";
+    localStream=await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+    localVideo.srcObject=localStream;
+
+    pc=new RTCPeerConnection();
+    localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+    pc.ontrack=e=>remoteVideo.srcObject=e.streams[0];
+
+    await pc.setRemoteDescription(new RTCSessionDescription(d.offer));
+    let ans=await pc.createAnswer();
+    await pc.setLocalDescription(ans);
+    callRef.push({answer:ans,from:uid});
+  }
+
+  if(d.answer){
+    await pc.setRemoteDescription(new RTCSessionDescription(d.answer));
+  }
+
+  if(d.ice){
+    pc.addIceCandidate(new RTCIceCandidate(d.ice));
+  }
+});
+
+function endCall(){
+  videoBox.style.display="none";
+  pc && pc.close();
+  callRef.remove();
+}
+</script>
+</body>
+</html>
