@@ -1,0 +1,209 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Secret Chat</title>
+<style>
+body{margin:0;background:#0f172a;color:white;font-family:Arial}
+.top{background:#020617;padding:10px;display:flex;gap:6px;align-items:center}
+button,input,select{padding:8px;border-radius:6px;border:none}
+button{background:#2563eb;color:white;cursor:pointer}
+#channels{padding:6px;background:#020617}
+#messages{height:45vh;overflow:auto;padding:10px}
+.msg{margin:6px;padding:6px;border-radius:6px;background:#1e293b;position:relative}
+.mine{background:#2563eb}
+.deleteMsg{position:absolute;right:4px;top:2px;background:red;padding:2px 4px;border-radius:4px;font-size:12px;cursor:pointer}
+.bottom{display:flex;position:fixed;bottom:0;width:100%;background:#020617;padding:6px}
+video{width:45%;border-radius:10px;background:black}
+#videoBox{display:none;position:fixed;inset:0;background:black;padding:10px}
+#incoming{display:none;position:fixed;inset:0;background:rgba(0,0,0,.8);padding-top:40vh;text-align:center}
+</style>
+</head>
+<body>
+
+<h2>Secret Chat – Public Channels</h2>
+
+<div class="top">
+<select id="channelSelect"></select>
+<button onclick="createChannel()">➕</button>
+<button onclick="searchChannel()">🔍</button>
+<button onclick="deleteChannel()">🗑 Delete Channel</button>
+<button onclick="startCall()">📹 Video Call</button>
+</div>
+
+<div id="messages"></div>
+
+<div class="bottom">
+<input id="msg" placeholder="Message">
+<button onclick="send()">➤</button>
+</div>
+
+<div id="incoming">
+<h3>Incoming Call</h3>
+<button onclick="acceptCall()">✅ Accept</button>
+<button onclick="rejectCall()">❌ Reject</button>
+</div>
+
+<div id="videoBox">
+<video id="localVideo" autoplay muted></video>
+<video id="remoteVideo" autoplay></video><br>
+<button onclick="toggleMic()">🔇 Mic</button>
+<button onclick="toggleCam()">📷 Cam</button>
+<button onclick="endCall()">❌ End</button>
+</div>
+
+<audio id="ring" loop>
+<source src="https://actions.google.com/sounds/v1/alarms/phone_alerts_and_rings.ogg">
+</audio>
+
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+
+<script>
+// Firebase config
+const firebaseConfig={
+  apiKey:"AIzaSyBfm9sdgiWVParO8zI2gP7xATUCODCLkzw",
+  authDomain:"secret-chat-2f397.firebaseapp.com",
+  databaseURL:"https://secret-chat-2f397-default-rtdb.firebaseio.com",
+  projectId:"secret-chat-2f397"
+};
+firebase.initializeApp(firebaseConfig);
+const db=firebase.database();
+
+// User
+const uid=localStorage.uid||Math.random().toString(36).slice(2);
+localStorage.uid=uid;
+const name=localStorage.name||prompt("Your name");
+localStorage.name=name;
+
+// Channels
+const channelSelect=document.getElementById("channelSelect");
+let currentChannel="Public";
+let msgRef,callRef;
+
+db.ref("channels/Public").set(true);
+db.ref("channels").on("value",s=>{
+  channelSelect.innerHTML="";
+  Object.keys(s.val()||{}).forEach(c=>{
+    let o=document.createElement("option");
+    o.value=o.text=c;
+    channelSelect.appendChild(o);
+  });
+  switchChannel(channelSelect.value||"Public");
+});
+
+function createChannel(){
+  const n=prompt("Channel name");
+  if(n) db.ref("channels/"+n).set(true);
+}
+
+function searchChannel(){
+  const n=prompt("Enter channel name");
+  if(!n)return;
+  db.ref("channels/"+n).once("value",s=>{
+    if(s.exists()){ channelSelect.value=n; switchChannel(n);}
+    else alert("Channel not found");
+  });
+}
+
+function deleteChannel(){
+  if(confirm("Delete this channel and all messages?")){
+    db.ref("channels/"+currentChannel).remove();
+    db.ref("rooms/"+currentChannel).remove();
+  }
+}
+
+channelSelect.onchange=()=>switchChannel(channelSelect.value);
+
+function switchChannel(c){
+  currentChannel=c;
+  messages.innerHTML="";
+  msgRef=db.ref("rooms/"+c+"/messages");
+  callRef=db.ref("calls/"+c);
+
+  msgRef.on("child_added",snap=>{
+    const d=snap.val();
+    const div=document.createElement("div");
+    div.className="msg "+(d.uid===uid?"mine":"");
+    div.innerText=d.name+": "+d.text;
+
+    // delete button
+    const del=document.createElement("span");
+    del.innerText="🗑";
+    del.className="deleteMsg";
+    del.onclick=()=>msgRef.child(snap.key).remove();
+    div.appendChild(del);
+
+    messages.appendChild(div);
+    messages.scrollTop=messages.scrollHeight;
+  });
+}
+
+// Send message
+function send(){
+  if(!msg.value)return;
+  msgRef.push({name,text:msg.value,uid});
+  msg.value="";
+}
+
+/* VIDEO CALL */
+let pc,localStream;
+const ring=document.getElementById("ring");
+
+async function startCall(){
+  await callRef.remove();
+  pc=await createPC();
+  const offer=await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  callRef.set({offer,from:uid});
+}
+
+callRef.on("value",async s=>{
+  const d=s.val();
+  if(!d||d.from===uid)return;
+
+  if(d.offer){
+    ring.play();
+    incoming.style.display="block";
+    window.offer=d.offer;
+  }
+  if(d.answer&&pc){
+    await pc.setRemoteDescription(new RTCSessionDescription(d.answer));
+  }
+  if(d.ice&&pc){
+    pc.addIceCandidate(new RTCIceCandidate(d.ice));
+  }
+});
+
+async function acceptCall(){
+  ring.pause();
+  incoming.style.display="none";
+  pc=await createPC();
+  await pc.setRemoteDescription(new RTCSessionDescription(window.offer));
+  const ans=await pc.createAnswer();
+  await pc.setLocalDescription(ans);
+  callRef.update({answer:ans});
+}
+
+function rejectCall(){ ring.pause(); incoming.style.display="none"; callRef.remove(); }
+
+async function createPC(){
+  videoBox.style.display="block";
+  localStream=await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+  localVideo.srcObject=localStream;
+
+  pc=new RTCPeerConnection();
+  localStream.getTracks().forEach(t=>pc.addTrack(t,localStream));
+  pc.ontrack=e=>remoteVideo.srcObject=e.streams[0];
+  pc.onicecandidate=e=>e.candidate&&callRef.update({ice:e.candidate});
+  return pc;
+}
+
+function toggleMic(){localStream.getAudioTracks()[0].enabled^=true}
+function toggleCam(){localStream.getVideoTracks()[0].enabled^=true}
+function endCall(){pc&&pc.close();callRef.remove();videoBox.style.display="none"}
+</script>
+
+</body>
+</html>
